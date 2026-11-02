@@ -969,6 +969,11 @@ def web_v10_checks(q):
     echo = subprocess.Popen(
         ["python3", os.path.join(HERE, "echo_server.py")],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # NEXT-STEPS P0: a host that drips one body byte every 3 s,
+    # inside the download core's 10 s idle timeout.
+    drip = subprocess.Popen(
+        ["python3", os.path.join(HERE, "drip_server.py")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     big = os.path.join(HERE, "testsite", "big.html")
     cur = [28, 184]
 
@@ -1098,6 +1103,41 @@ def web_v10_checks(q):
         report("web1.0: <img> fetched, decoded, scaled in flow",
                ok_img, "magenta=%d cyan=%d" % (nm, nc))
         save_png(os.path.join(ROOT, "browser-pic-v10.png"), w, h, pix)
+
+        # ---------- NEXT-STEPS P0: stalled image host ----------
+        # slowimg.html has no page text at all: its only text is
+        # the <img> alt, so dark pixels in the content area prove
+        # the alt fallback rendered. Without a per-image total
+        # deadline the dripping image would hold the page for
+        # the 120 s body cap, so the 30 s wait below fails;
+        # with the 5 s deadline the page lands in ~10 s.
+        nav("10.0.2.2:8080/slowimg.html")
+        got = wait_color(q, WEB_GREEN, 30000, timeout=30,
+                         region=CONTENT)
+        w, h, pix = got
+        ng = count_close(pix, w, h, WEB_GREEN, region=CONTENT) \
+            if got else 0
+        nalt = count_dark(pix, w, CONTENT) if got else 0
+        report("web1.0: stalled image host finishes the page "
+               "with alt text (P0 timeout)",
+               ng >= 30000 and nalt >= 50,
+               "green=%d dark=%d" % (ng, nalt))
+        # and the browser is still responsive afterwards. Return
+        # to picpage, not another page: the failed-navigation
+        # suite below expects the previous page to still be the
+        # magenta/cyan image page (its "oldpage" assertion).
+        nav("10.0.2.2:8080/picpage.html")
+        got = wait_color(q, (255, 0, 255), 6000, timeout=60,
+                         region=CONTENT)
+        w, h, pix = got
+        nm = count_close(pix, w, h, (255, 0, 255), region=CONTENT) \
+            if got else 0
+        nc = count_close(pix, w, h, (0, 255, 255), region=CONTENT) \
+            if got else 0
+        report("web1.0: browser stays responsive after the "
+               "stalled image (P0 timeout)",
+               nm >= 6000 and nc >= 1500,
+               "magenta=%d cyan=%d" % (nm, nc))
 
         # ---------- failed navigations stay in the browser ----
         fails = [
@@ -1278,6 +1318,7 @@ def web_v10_checks(q):
                "green=%d" % ng)
     finally:
         echo.terminate()
+        drip.terminate()
         if os.path.exists(big):
             os.unlink(big)
 

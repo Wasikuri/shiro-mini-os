@@ -36,6 +36,9 @@ int net_download(const char *url,
 int net_download_stopok(const char *url,
                         int (*sink)(const void *data, size_t len, void *ctx),
                         void *ctx, uint32_t *out_len);
+int net_download_stopok_timeout(const char *url,
+                        int (*sink)(const void *data, size_t len, void *ctx),
+                        void *ctx, uint32_t *out_len, int timeout_s);
 int net_post(const char *url, const void *body, uint32_t body_len,
              int (*sink)(const void *data, size_t len, void *ctx),
              void *ctx, uint32_t *out_len);

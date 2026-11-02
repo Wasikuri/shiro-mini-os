@@ -706,13 +706,41 @@ static void run_command(char *line) {
         if (src[0] == 0 || dst[0] == 0) { print("Usage: cp <src> <dst>\n"); return; }
         char probe[1];
         if (fs_read_file(dst, probe, 1) >= 0) { print("Destination exists.\n"); return; }
-        char *cpbuf = kmalloc(61440);
-        if (!cpbuf) { print("Out of memory.\n"); return; }
-        int n = fs_read_file(src, cpbuf, 61440);
-        if (n < 0) { print("No such file.\n"); kfree(cpbuf); return; }
-        if (fs_write_file(dst, cpbuf, (uint32_t)n) == 0) print("Copied.\n");
-        else print("Copy failed.\n");
-        kfree(cpbuf);
+        int src_size = fs_file_size(src);
+        if (src_size < 0) { print("No such file.\n"); return; }
+        /* Small files keep the old whole-file path. Large files
+         * used to fail outright at the old 60 KB write cap, and
+         * simply lifting that cap would silently truncate them
+         * to the 61440-byte buffer, so they go through the
+         * streaming writer in 4096-byte chunks instead. */
+        if (src_size <= 61440) {
+            char *cpbuf = kmalloc(61440);
+            if (!cpbuf) { print("Out of memory.\n"); return; }
+            int n = fs_read_file(src, cpbuf, 61440);
+            if (n < 0) { print("No such file.\n"); kfree(cpbuf); return; }
+            if (fs_write_file(dst, cpbuf, (uint32_t)n) == 0) print("Copied.\n");
+            else print("Copy failed.\n");
+            kfree(cpbuf);
+            return;
+        }
+        char *chunk = kmalloc(4096);
+        if (!chunk) { print("Out of memory.\n"); return; }
+        if (fs_stream_begin(dst, (uint32_t)src_size) != 0) {
+            print("Copy failed.\n"); kfree(chunk); return;
+        }
+        uint32_t off = 0;
+        int ok = 1;
+        while (off < (uint32_t)src_size) {
+            uint32_t want = (uint32_t)src_size - off;
+            if (want > 4096) want = 4096;
+            int n = fs_read_file_at(src, chunk, off, want);
+            if (n <= 0 || (uint32_t)n != want) { ok = 0; break; }
+            if (fs_stream_write(chunk, (uint32_t)n) != 0) { ok = 0; break; }
+            off += (uint32_t)n;
+        }
+        if (ok && fs_stream_commit() == 0) print("Copied.\n");
+        else { fs_stream_abort(); print("Copy failed.\n"); }
+        kfree(chunk);
     } else if (strncmp_(line, "mv ", 3) == 0) {
         if (!fs_present()) { print("No disk.\n"); return; }
         char src[28], dst[28];

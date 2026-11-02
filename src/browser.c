@@ -968,6 +968,11 @@ static int scan_attr(const char *s, const char *end, const char *name,
 #define IMG_ENC_MAX (1024 * 1024)     /* skip encoded images > 1 MB */
 #define IMG_PIX_MAX (2200 * 1000)     /* skip decodes > ~2.2 Mpx */
 #define IMG_TAB_BYTES (6 * 1024 * 1024)
+/* NEXT-STEPS P0: one image fetch (DNS + connect + headers +
+ * body) gets at most this many seconds; on expiry the image
+ * fails and the alt text is shown, so a stalled image host
+ * cannot hold up the rest of the page. */
+#define IMG_FETCH_TIMEOUT_S 5
 
 static void tab_free_images(struct tab *t) {
     for (int i = 0; i < t->nimgs; i++) {
@@ -995,7 +1000,8 @@ static void img_fetch_decode(struct tab *t, const char *url) {
     if (!enc) return;
     struct membuf m;
     m.buf = enc; m.len = 0; m.cap = IMG_ENC_MAX; m.overflow = 0;
-    int rc = net_download_stopok(url, membuf_sink, &m, NULL);
+    int rc = net_download_stopok_timeout(url, membuf_sink, &m, NULL,
+                                         IMG_FETCH_TIMEOUT_S);
     if ((rc != 1 && rc != 2) || m.overflow || m.len == 0) {
         kfree(enc);
         return;

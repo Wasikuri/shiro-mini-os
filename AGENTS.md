@@ -133,6 +133,9 @@ python3 tests/qemu_test.py web      # one group
   timers, event handlers, or dynamic DOM). Layout is a simple flow model
   (no float/flex/grid/absolute positioning). CSS is the README-listed subset
   only. Images load **sequentially and synchronously** during page load.
+  Each image fetch is capped at **5 s total** (DNS + connect + headers +
+  body, NEXT-STEPS P0); on timeout the alt text is shown and the rest of
+  the page continues loading.
   Page cap 256 KB / 1024 lines. In-memory cookie jar only (cleared on GUI
   exit). Full limits list is in README's browser section — keep it honest
   and current when you change behavior.

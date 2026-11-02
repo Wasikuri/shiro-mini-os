@@ -113,6 +113,21 @@ static int sec_elapsed(uint32_t start) {
     return d;
 }
 
+/* ---------- per-transfer deadline (NEXT-STEPS P0) ----------
+ * A single transfer (currently: one browser image fetch) gets a
+ * total budget in RTC seconds, covering DNS + TCP connect + TLS
+ * + headers + body, so a stalled host cannot stretch the fetch
+ * past the budget by dribbling bytes just inside the per-phase
+ * idle timeouts. Set by the download wrapper below, cleared when
+ * it returns; all other transfers leave it inactive (0). */
+static int dl_deadline_active = 0;
+static uint32_t dl_deadline_start = 0;
+static int dl_deadline_secs = 0;
+static int dl_expired(void) {
+    return dl_deadline_active &&
+           sec_elapsed(dl_deadline_start) >= dl_deadline_secs;
+}
+
 /* ---------- print helpers ---------- */
 static void print_u32(uint32_t v) {
     char buf[12]; int i = 0;
@@ -720,7 +735,7 @@ static int dns_resolve_udp(const uint8_t *q, int qlen, uint32_t *out_ip) {
         udp_got = 0;
         udp_send(DNS_SRV, 53535, 53, q, (size_t)qlen);
         uint32_t start = time_sec();
-        while (sec_elapsed(start) < 4) {
+        while (sec_elapsed(start) < 4 && !dl_expired()) {
             net_poll();
             if (!udp_got) continue;
             if (dns_parse_response(udp_buf, (int)udp_len, out_ip)) return 1;
@@ -858,7 +873,7 @@ static int tcp_connect(uint32_t ip, uint16_t port) {
     tcp_rcv_nxt = 0; tcp_rxlen = 0; tcp_error = 0; tcp_state = 1;
     uint32_t start = time_sec();
     int last_sent = -10;
-    while (sec_elapsed(start) < 12) {
+    while (sec_elapsed(start) < 12 && !dl_expired()) {
         if (tcp_state == 1 && sec_elapsed(start) - last_sent >= 2) {
             tcp_send_seg(TCP_SYN, NULL, 0);
             last_sent = sec_elapsed(start);
@@ -876,7 +891,7 @@ static void tcp_send_data(const uint8_t *data, size_t len) {
     tcp_snd_nxt += (uint32_t)len;
     uint32_t start = time_sec();
     int resent = 0;
-    while (sec_elapsed(start) < 6) {
+    while (sec_elapsed(start) < 6 && !dl_expired()) {
         net_poll();
         if (tcp_snd_una >= tcp_snd_nxt) return;
         if (tcp_error) return;
@@ -921,6 +936,14 @@ int net_tcp_write_all(const uint8_t *data, size_t len) {
 
 int net_tcp_read_some(uint8_t *buf, size_t max, int timeout_s) {
     uint32_t start = time_sec();
+    /* A per-transfer deadline caps this read too, so a TLS image
+     * fetch cannot sit inside one 15 s BearSSL read past it. */
+    int eff_timeout = timeout_s;
+    if (dl_deadline_active) {
+        int rem = dl_deadline_secs - sec_elapsed(dl_deadline_start);
+        if (rem <= 0) return -2;
+        if (rem < eff_timeout) eff_timeout = rem;
+    }
     for (;;) {
         if (tcp_rxlen > 0) {
             size_t take = tcp_rxlen < max ? (size_t)tcp_rxlen : max;
@@ -931,7 +954,8 @@ int net_tcp_read_some(uint8_t *buf, size_t max, int timeout_s) {
         }
         if (tcp_error) return -1;
         if (tcp_state == 3 || tcp_state == 0) return 0; /* FIN / closed */
-        if (sec_elapsed(start) >= timeout_s) return -2;
+        if (sec_elapsed(start) >= eff_timeout) return -2;
+        if (dl_expired()) return -2;
         net_poll();
     }
 }
@@ -949,7 +973,7 @@ static int dns_resolve_tcp(const uint8_t *q, int qlen, uint32_t *out_ip) {
     /* wait for the length-prefixed response */
     uint32_t start = time_sec();
     int ok = 0;
-    while (sec_elapsed(start) < 10) {
+    while (sec_elapsed(start) < 10 && !dl_expired()) {
         net_poll();
         if (tcp_rxlen >= 2) {
             size_t mlen = ((size_t)tcp_rxbuf[0] << 8) | tcp_rxbuf[1];
@@ -1546,7 +1570,7 @@ static int dl_fetch(const char *host, uint16_t port, const char *path,
     size_t hlen = 0, hdr_body_off = 0;
     int header_done = 0, hdr_failed = 0;
     uint32_t start = time_sec(); uint32_t last_data = time_sec();
-    while (!header_done && sec_elapsed(start) < 40) {
+    while (!header_done && sec_elapsed(start) < 40 && !dl_expired()) {
         if (!use_tls) net_poll();
         if (conn_fill()) last_data = time_sec();
         while (conn_stage_len > 0 && !header_done) {
@@ -1645,7 +1669,8 @@ static int dl_fetch(const char *host, uint16_t port, const char *path,
             aborted = 1;
     }
     start = time_sec(); last_data = time_sec();
-    while (!aborted && !body.done && sec_elapsed(start) < 120) {
+    while (!aborted && !body.done && sec_elapsed(start) < 120 &&
+           !dl_expired()) {
         if (!use_tls) net_poll();
         if (conn_fill()) last_data = time_sec();
         while (conn_stage_len > 0 && !body.done) {
@@ -1666,6 +1691,13 @@ static int dl_fetch(const char *host, uint16_t port, const char *path,
     }
     if (body.chunked && body.state == 3 && conn_stage_eof)
         body.done = 1; /* peer closed right after the last chunk */
+    /* A deadline break is a failure even for close-delimited
+     * bodies, whose framing alone would otherwise report the
+     * partial bytes as a complete transfer. */
+    if (dl_expired() && !body.done) {
+        print("Download incomplete (timeout).\n");
+        return 0;
+    }
     if (!body.done && (body.chunked || content_length >= 0)) {
         if (use_tls && conn_fatal && tls_last_error()) tls_print_error();
         print("Download incomplete.\n");
@@ -1699,6 +1731,31 @@ int net_download_stopok(const char *url,
     dl_post_data = NULL; dl_post_len = 0;
     dl_early_stop_ok = 1;
     int r = dl_get(url, 0, &s, out_len);
+    dl_early_stop_ok = 0;
+    return r;
+}
+
+/* Like net_download_stopok, but the whole transfer (DNS +
+ * connect + headers + body, across redirects) must finish within
+ * timeout_s seconds of RTC time, or it fails with code 0. Used
+ * by the browser for one image at a time: a stalled image host
+ * must not hold up the rest of the page. The deadline is set
+ * once here and survives the redirect recursion inside dl_get;
+ * it is cleared on return so other transfers are unaffected. */
+int net_download_stopok_timeout(const char *url,
+                        int (*sink)(const void *data, size_t len, void *ctx),
+                        void *ctx, uint32_t *out_len, int timeout_s) {
+    struct dl_sink s;
+    s.fn = sink; s.ctx = ctx;
+    if (out_len) *out_len = 0;
+    dl_post_data = NULL; dl_post_len = 0;
+    dl_early_stop_ok = 1;
+    dl_deadline_active = timeout_s > 0;
+    dl_deadline_start = time_sec();
+    dl_deadline_secs = timeout_s > 0 ? timeout_s : 0;
+    int r = dl_get(url, 0, &s, out_len);
+    dl_deadline_active = 0;
+    dl_deadline_secs = 0;
     dl_early_stop_ok = 0;
     return r;
 }

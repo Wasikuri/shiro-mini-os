@@ -268,18 +268,42 @@ static void free_run(uint32_t start, uint32_t n) {
 
 int fs_write_file(const char *name, const char *data, uint32_t len) {
     if (!disk_present) return -1;
-    if (len > 60000) return -1;
+    /* No arbitrary 60 KB cap any more: the caller supplies the whole
+     * buffer, and the only hard limit is a contiguous free run on the
+     * disk (at most (fs_total - DATA_START) sectors). Guard the
+     * sector count against overflow before computing it. */
+    if (fs_total <= DATA_START) return -1;
+    if (len > (fs_total - DATA_START) * 512u) return -1;
     uint32_t need = (len + 511) / 512;
     if (need == 0) need = 1;
     int idx = dir_find(name);
     if (idx < 0) {
         for (int i = 0; i < MAX_FILES; i++) if (!dir_cache[i].used) { idx = i; break; }
         if (idx < 0) return -1;
-    } else {
-        free_run(dir_cache[idx].start_sector, dir_cache[idx].alloc_sectors);
+    }
+    /* Allocate the new run before freeing the old one, so a failed
+     * write leaves the old file intact in RAM (and, since metadata
+     * is only synced at the end, on disk too). If no other run fits,
+     * fall back to freeing the old run and retrying; if that also
+     * fails, restore the old run's bitmap bits before giving up. */
+    uint32_t old_start = 0, old_alloc = 0;
+    int freed_old = 0;
+    if (idx >= 0 && dir_cache[idx].used) {
+        old_start = dir_cache[idx].start_sector;
+        old_alloc = dir_cache[idx].alloc_sectors;
     }
     uint32_t start = alloc_run(need);
+    if (!start && old_alloc > 0) {
+        free_run(old_start, old_alloc);
+        freed_old = 1;
+        start = alloc_run(need);
+        if (!start) {
+            for (uint32_t k = old_start; k < old_start + old_alloc; k++) bit_set(k, 1);
+            return -1;
+        }
+    }
     if (!start) return -1;
+    if (old_alloc > 0 && !freed_old) free_run(old_start, old_alloc);
     static uint8_t wbuf[512];
     for (uint32_t s = 0; s < need; s++) {
         uint32_t off = s * 512;
@@ -287,7 +311,14 @@ int fs_write_file(const char *name, const char *data, uint32_t len) {
         if (chunk > 512) chunk = 512;
         memset(wbuf, 0, 512);
         for (uint32_t i = 0; i < chunk; i++) wbuf[i] = (uint8_t)data[off + i];
-        if (ata_write(start + s, wbuf) != 0) return -1;
+        if (ata_write(start + s, wbuf) != 0) {
+            /* Roll the RAM bitmap back to the pre-write state. */
+            free_run(start, need);
+            if (old_alloc > 0) {
+                for (uint32_t k = old_start; k < old_start + old_alloc; k++) bit_set(k, 1);
+            }
+            return -1;
+        }
     }
     struct dir_entry *e = &dir_cache[idx];
     int j = 0;
@@ -317,6 +348,31 @@ int fs_read_file(const char *name, char *buf, uint32_t maxlen) {
         done += chunk;
     }
     return (int)n;
+}
+
+/* Read a slice of a file starting at `offset`. Returns bytes read,
+ * 0 at EOF, or -1 if the file does not exist or the disk errors.
+ * This is what chunked copies use so they never need the whole
+ * file in RAM at once (see the `cp` command). */
+int fs_read_file_at(const char *name, char *buf, uint32_t offset, uint32_t len) {
+    if (!disk_present) return -1;
+    int idx = dir_find(name);
+    if (idx < 0) return -1;
+    struct dir_entry *e = &dir_cache[idx];
+    if (offset >= e->size_bytes) return 0;
+    if (len > e->size_bytes - offset) len = e->size_bytes - offset;
+    static uint8_t rbuf[512];
+    uint32_t done = 0;
+    while (done < len) {
+        uint32_t pos = offset + done;
+        if (ata_read(e->start_sector + pos / 512, rbuf) != 0) return -1;
+        uint32_t sector_off = pos % 512;
+        uint32_t chunk = 512 - sector_off;
+        if (chunk > len - done) chunk = len - done;
+        for (uint32_t i = 0; i < chunk; i++) buf[done + i] = (char)rbuf[sector_off + i];
+        done += chunk;
+    }
+    return (int)len;
 }
 
 int fs_remove_file(const char *name) {
@@ -352,8 +408,8 @@ int fs_file_size(const char *name) {
 }
 
 /* ---------- streaming write (used by `install`, see apps.c) ----------
- * fs_write_file() needs the whole file in RAM and is capped at
- * 60 KB. This API instead reserves a contiguous run of
+ * fs_write_file() needs the whole file in RAM from its caller.
+ * This API instead reserves a contiguous run of
  * ceil(max_len/512) sectors up front and writes sector by sector
  * as data arrives. Crash robustness: the directory entry is
  * claimed in the RAM cache only, and metadata reaches the disk

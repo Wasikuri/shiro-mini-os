@@ -178,6 +178,7 @@ int fs_present(void);
 void fs_cmd_ls(void);
 int fs_write_file(const char *name, const char *data, uint32_t len);
 int fs_read_file(const char *name, char *buf, uint32_t maxlen); /* len or -1 */
+int fs_read_file_at(const char *name, char *buf, uint32_t offset, uint32_t len); /* bytes read, 0 at EOF, or -1 */
 int fs_remove_file(const char *name);
 int fs_rename_file(const char *oldn, const char *newn); /* 0 ok, -1 no src, -2 dst exists/invalid */
 int fs_list_name(int n, char *out, uint32_t max); /* nth file name (completion); 1 found, 0 none */
