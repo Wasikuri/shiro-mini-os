@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head><title>JS Test Page</title></head>
+<body bgcolor="#FFFFFF">
+<h1>JS Page</h1>
+<p id="out"></p>
+<p id="tail">TAILMARKER text</p>
+<script>
+throw new Error("boom - this must not break the page");
+</script>
+<script>
+document.getElementById('out').textContent = 'JSWROTE THIS TEXT';
+document.title = 'JS Title Set';
+</script>
+<script>
+document.write('<p>WRITTEN BY SCRIPT</p>');
+console.log('hello from js');
+</script>
+</body>
+</html>

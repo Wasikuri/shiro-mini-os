@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""dnsfwd-tcp: TCP framing wrapper for dnsfwd (RFC 7766 style).
+Reads a 2-byte-length-prefixed DNS query from stdin, hands the bare
+query to ./dnsfwd, writes the length-prefixed response to stdout.
+QEMU guestfwd spawns this per connection with stdio = the stream."""
+import os
+import struct
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def read_exact(n):
+    data = b""
+    while len(data) < n:
+        chunk = sys.stdin.buffer.read(n - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def main():
+    hdr = read_exact(2)
+    if len(hdr) < 2:
+        return
+    (qlen,) = struct.unpack(">H", hdr)
+    query = read_exact(qlen)
+    proc = subprocess.run([os.path.join(HERE, "dnsfwd")], input=query,
+                          capture_output=True)
+    resp = proc.stdout
+    sys.stdout.buffer.write(struct.pack(">H", len(resp)) + resp)
+    sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    main()

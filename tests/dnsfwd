@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""dnsfwd: read one raw DNS query from stdin, resolve the A record via
+the host resolver (NSS), write a raw DNS response to stdout.
+Used behind QEMU guestfwd because this sandbox blocks QEMU's UDP DNS."""
+import socket
+import struct
+import sys
+
+
+def parse_qname(msg, off):
+    labels = []
+    while off < len(msg):
+        ln = msg[off]
+        if ln == 0:
+            return ".".join(labels), off + 1
+        labels.append(msg[off + 1:off + 1 + ln].decode("ascii", "replace"))
+        off += 1 + ln
+    return ".".join(labels), off
+
+
+def main():
+    query = sys.stdin.buffer.read()
+    if len(query) < 12:
+        return
+    qid, flags, qd = struct.unpack(">HHH", query[0:6])
+    qname, qend = parse_qname(query, 12)
+    question = query[12:qend + 4]
+    try:
+        infos = socket.getaddrinfo(qname, 80, socket.AF_INET, socket.SOCK_STREAM)
+        ip = infos[0][4][0]
+    except Exception:
+        # NXDOMAIN-ish: header + question, no answers, rcode 3
+        resp = struct.pack(">HHHHHH", qid, 0x8183, 1, 0, 0, 0) + question
+        sys.stdout.buffer.write(resp)
+        return
+    resp = struct.pack(">HHHHHH", qid, 0x8180, 1, 1, 0, 0) + question
+    resp += struct.pack(">HHHIH", 0xC00C, 1, 1, 60, 4) + socket.inet_aton(ip)
+    sys.stdout.buffer.write(resp)
+
+
+if __name__ == "__main__":
+    main()

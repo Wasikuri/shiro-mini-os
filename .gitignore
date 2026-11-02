@@ -1,0 +1,23 @@
+# === NEVER publish ===
+# Web terminal: contains an access key (access_key.txt) and a session
+# disk image with user data. Excluded unconditionally.
+webterm/
+
+# === Disk images & harness scratch state ===
+*.img
+tests/work/
+
+# === Build outputs (keep sources, not artifacts) ===
+build/
+isodir/
+*.iso
+*.o
+/src/user/hello
+/src/user/calc
+
+# === Python / editor / OS junk ===
+__pycache__/
+*.pyc
+.DS_Store
+*~
+*.swp
