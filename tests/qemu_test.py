@@ -297,7 +297,7 @@ def boot(fresh_disk=False, marker="Type 'help'"):
 
 def check_boot_uptime_mem(q):
     scr = q.screen()
-    report("boot: v1.0.1 banner", "Shiro Mini OS v1.0.1" in scr)
+    report("boot: v1.0.2 banner", "Shiro Mini OS v1.0.2" in scr)
     q.cmd("uptime", marker="Uptime:")
     m1 = re.search(r"Uptime: (\d+) s", q.screen())
     time.sleep(3)
@@ -524,6 +524,31 @@ def check_apps(q):
     q.cmd("apps", marker="No apps installed")
     report("apps: uninstall removes apps", "calc" not in q.screen(),
            q.screen()[-300:])
+    # --- v1.0.2 security regressions (docs/security-review.md) ---
+    # (i) The red-team round-2 wraparound ELF: on v1.0.1 its second
+    # segment overwrote syscall_handler in ring 0. Now the loader
+    # must reject the whole image and the shell must stay alive.
+    q.cmd("install http://10.0.2.2/wrapelf", marker="Installed wrapelf (",
+          timeout=90)
+    q.cmd("run wrapelf", marker="Program exited with code", timeout=30)
+    scr = q.screen()
+    report("apps: wraparound ELF rejected at load (v1.0.2)",
+           "ELF: segment outside user window." in scr
+           or "ELF: segment overlaps kernel." in scr, scr[-300:])
+    q.cmd("version", marker="v1.0.2")
+    report("apps: shell alive after wraparound rejection",
+           "Shiro Mini OS v1.0.2" in q.screen())
+    # (ii) write() with a kernel-space pointer must be refused:
+    # the fixture app prints BLOCKED when the syscall rejects it
+    # (on v1.0.1 it printed ALLOWED after dumping kernel memory).
+    q.cmd("install http://10.0.2.2/leak", marker="Installed leak (",
+          timeout=90)
+    q.cmd("run leak", marker="Program exited with code", timeout=30)
+    scr = q.screen()
+    report("apps: write syscall refuses kernel pointer (v1.0.2)",
+           "BLOCKED" in scr and "ALLOWED" not in scr, scr[-300:])
+    q.cmd("uninstall wrapelf", marker="Uninstalled wrapelf.")
+    q.cmd("uninstall leak", marker="Uninstalled leak.")
 
 
 def check_shell_qol(q):
@@ -550,7 +575,7 @@ def check_shell_qol(q):
     q.sendkey("tab")
     time.sleep(0.5)
     q.sendkey("ret")
-    ok = q.wait_for("Shiro Mini OS v1.0.1", timeout=15)
+    ok = q.wait_for("Shiro Mini OS v1.0.2", timeout=15)
     report("shell: tab completes command name", ok, q.screen()[-300:])
     # Tab completion of a file name as an argument. Assert on a bare
     # "ZDATA9" output line: the `write` command line itself contains
@@ -582,8 +607,8 @@ def check_run_hello(q):
     # this check still passed on the exit line alone.
     report("user: hello echo visible (syscall memory clobber)",
            "xyz" in q.screen(), q.screen()[-400:])
-    q.cmd("version", marker="v1.0.1")
-    report("user: shell alive after exit", "Shiro Mini OS v1.0.1" in q.screen())
+    q.cmd("version", marker="v1.0.2")
+    report("user: shell alive after exit", "Shiro Mini OS v1.0.2" in q.screen())
 
 
 # v0.5.1 modern theme: the desktop is a 48-step gradient between
@@ -740,9 +765,9 @@ def check_res(q):
     # ESC from the VBE mode must restore the text shell.
     q.sendkey("esc")
     time.sleep(2)
-    q.cmd("version", marker="v1.0.1")
+    q.cmd("version", marker="v1.0.2")
     report("res: esc from VBE restores text shell, version v0.8",
-           "Shiro Mini OS v1.0.1" in q.screen())
+           "Shiro Mini OS v1.0.2" in q.screen())
     # v0.9: 1280x1024 (two flip pages = 10.5 MB, fits the 16 MB
     # VRAM) and 1280x720 must work too; leave 800x600 saved after.
     q.cmd("res 1280 1024", marker="1280x1024")
@@ -1517,7 +1542,7 @@ def check_web(q):
         # --- ESC restores the text shell ---
         q.sendkey("esc")
         time.sleep(2)
-        q.cmd("version", marker="v1.0.1")
+        q.cmd("version", marker="v1.0.2")
         report("web: ESC restores text shell", "v1.0" in q.screen())
         # --- HTTPS page in the browser (local TLS server, :8446) ---
         q.type_text("web https://10.0.2.2:8446/tlspage.html")
@@ -1601,6 +1626,109 @@ CHECKS = {
 }
 
 
+def _elf32_image(segments, entry=0x400000):
+    """Assemble a minimal ELF32 ET_EXEC image. segments is a list of
+    (offset, vaddr, filesz, memsz, blob) tuples; blobs are placed at
+    the given file offsets."""
+    import struct
+    ehsize, phent = 52, 32
+    eh = bytearray(ehsize)
+    eh[0:4] = b"\x7fELF"
+    eh[4] = 1  # ELFCLASS32
+    eh[5] = 1  # little-endian
+    eh[6] = 1  # version
+    struct.pack_into("<HHIIIIIHHHHHH", eh, 16,
+                     2, 3, 1, entry, ehsize, 0, 0,
+                     ehsize, phent, len(segments), 0, 0, 0)
+    ph = b""
+    size = ehsize + phent * len(segments)
+    for off, vaddr, filesz, memsz, blob in segments:
+        ph += struct.pack("<IIIIIIII", 1, off, vaddr, vaddr,
+                          filesz, memsz, 5, 0x1000)
+        size = max(size, off + len(blob))
+    img = bytearray(size)
+    img[0:ehsize] = eh
+    img[ehsize:ehsize + len(ph)] = ph
+    for off, vaddr, filesz, memsz, blob in segments:
+        img[off:off + len(blob)] = blob
+    return bytes(img)
+
+
+def _write_wrapelf(path):
+    """v1.0.2 security regression fixture (docs/security-review.md):
+    segment A is an ordinary ring-3 program at 0x400000; segment B
+    has vaddr inside the kernel image (0x110000) and a huge p_memsz
+    (0xFF000000) chosen so the v1.0.1 loader's 32-bit segment-end
+    computation wrapped below the kernel and the copy loop wrote
+    segment B's bytes over kernel code. The fixed loader must
+    reject the whole image before copying anything."""
+    # Segment A code: write(0x400000+29, "WRAP RAN\n", 9); exit(7).
+    code = b"".join([
+        b"\xB8\x01\x00\x00\x00",          # mov eax,1 (write)
+        b"\xBB\x1D\x00\x40\x00",          # mov ebx,0x40001D (msg)
+        b"\xB9\x09\x00\x00\x00",          # mov ecx,9
+        b"\xCD\x80",                      # int 0x80
+        b"\xB8\x03\x00\x00\x00",          # mov eax,3 (exit)
+        b"\xBB\x07\x00\x00\x00",          # mov ebx,7
+        b"\xCD\x80",                      # int 0x80
+        b"WRAP RAN\n",
+    ])
+    payload = b"\xCC" * 16  # would land on kernel code in v1.0.1
+    img = _elf32_image([
+        (0x1000, 0x400000, len(code), len(code), code),
+        (0x2000, 0x110000, len(payload), 0xFF000000, payload),
+    ])
+    with open(path, "wb") as f:
+        f.write(img)
+
+
+def _write_leakapp(path):
+    """v1.0.2 security regression fixture: a user app that calls
+    write(0x100000, 64) — a pointer into kernel memory — and then
+    reports the outcome using its own buffers: it prints BLOCKED
+    when the syscall refuses the pointer (fixed kernel) and
+    ALLOWED when the call went through (v1.0.1 also dumped the 64
+    kernel bytes to the screen first)."""
+    base = 0x400000
+    code = bytearray()
+    code += b"\xB8\x01\x00\x00\x00"       # mov eax,1 (write)
+    code += b"\xBB\x00\x00\x10\x00"       # mov ebx,0x100000 (kernel!)
+    code += b"\xB9\x40\x00\x00\x00"       # mov ecx,64
+    code += b"\xCD\x80"                   # int 0x80
+    code += b"\x83\xF8\xFF"               # cmp eax,-1
+    je_at = len(code)
+    code += b"\x74\x00"                   # je blocked (patched below)
+    code += b"\xB8\x01\x00\x00\x00"       # mov eax,1
+    a_at = len(code)
+    code += b"\xBB\x00\x00\x00\x00"       # mov ebx,msg_allowed (patched)
+    code += b"\xB9\x08\x00\x00\x00"       # mov ecx,8
+    code += b"\xCD\x80"                   # int 0x80
+    jmp_at = len(code)
+    code += b"\xEB\x00"                   # jmp done (patched below)
+    blocked = len(code)
+    code += b"\xB8\x01\x00\x00\x00"       # mov eax,1
+    b_at = len(code)
+    code += b"\xBB\x00\x00\x00\x00"       # mov ebx,msg_blocked (patched)
+    code += b"\xB9\x08\x00\x00\x00"       # mov ecx,8
+    code += b"\xCD\x80"                   # int 0x80
+    done = len(code)
+    code += b"\xB8\x03\x00\x00\x00"       # mov eax,3 (exit)
+    code += b"\x31\xDB"                   # xor ebx,ebx
+    code += b"\xCD\x80"                   # int 0x80
+    msg_blocked = len(code)
+    code += b"BLOCKED\n"
+    msg_allowed = len(code)
+    code += b"ALLOWED\n"
+    code[je_at + 1] = blocked - (je_at + 2)
+    code[jmp_at + 1] = done - (jmp_at + 2)
+    code[a_at + 1:a_at + 5] = (base + msg_allowed).to_bytes(4, "little")
+    code[b_at + 1:b_at + 5] = (base + msg_blocked).to_bytes(4, "little")
+    img = _elf32_image([(0x1000, base, len(code), len(code), bytes(code))],
+                       entry=base)
+    with open(path, "wb") as f:
+        f.write(img)
+
+
 def _write_testpic(path):
     """Write the <img> test fixture: 240x160 RGB PNG, magenta with a
     cyan top-left quarter (120x80). Stdlib only."""
@@ -1640,6 +1768,11 @@ def main():
     testpic = os.path.join(HERE, "testsite", "testpic.png")
     if not os.path.exists(testpic):
         _write_testpic(testpic)
+    # v1.0.2 security regression fixtures for the apps group
+    # (docs/security-review.md): regenerated every run so they can
+    # never drift from the generators above.
+    _write_wrapelf(os.path.join(HERE, "testsite", "wrapelf"))
+    _write_leakapp(os.path.join(HERE, "testsite", "leak"))
     server = subprocess.Popen(
         ["python3", "-m", "http.server", "80", "--directory",
          os.path.join(HERE, "testsite"), "--bind", "0.0.0.0"],

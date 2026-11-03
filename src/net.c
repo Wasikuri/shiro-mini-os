@@ -1130,7 +1130,7 @@ static int http_fetch(const char *host, uint16_t port, const char *path, int dep
     size_t rl = 0;
     const char *parts[4] = {"GET ", path, " HTTP/1.1\r\nHost: ", host};
     for (int i = 0; i < 4; i++) { size_t l = slen(parts[i]); memcpy(req + rl, parts[i], l); rl += l; }
-    const char *tail = "\r\nUser-Agent: ShiroMiniOS/1.0.1\r\nConnection: close\r\n\r\n";
+    const char *tail = "\r\nUser-Agent: ShiroMiniOS/1.0.2\r\nConnection: close\r\n\r\n";
     size_t tl2 = slen(tail); memcpy(req + rl, tail, tl2); rl += tl2;
     if (use_tls) {
         if (!tls_write_all((const uint8_t *)req, rl)) {
@@ -1538,7 +1538,7 @@ static int dl_fetch(const char *host, uint16_t port, const char *path,
             l = slen(ck); memcpy(req + rl, ck, l); rl += l;
         }
     }
-    const char *tail = "\r\nUser-Agent: ShiroMiniOS/1.0.1\r\nConnection: close\r\n\r\n";
+    const char *tail = "\r\nUser-Agent: ShiroMiniOS/1.0.2\r\nConnection: close\r\n\r\n";
     size_t tl2 = slen(tail); memcpy(req + rl, tail, tl2); rl += tl2;
     if (use_tls) {
         if (!tls_write_all((const uint8_t *)req, rl)) {

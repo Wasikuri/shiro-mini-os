@@ -44,8 +44,8 @@ python3 tests/qemu_test.py web      # one group
   default-set names (`boot`, `help`, `ps`, `date`, `dhcp`, `net`, `shell`,
   `run`). **"default" is NOT a group name** — the no-argument run is the
   default set.
-- Green baselines at v1.0.1: default 22/22, fs 8/8, gui 23/23, tls 4/4,
-  apps 10/10, jstest 1/1, web 40/40, uefi 5/5.
+- Green baselines at v1.0.2: default 22/22, fs 8/8, gui 23/23, tls 4/4,
+  apps 13/13, jstest 1/1, web 40/40, uefi 5/5.
 - **Serialize all harness runs.** The harness kills stray QEMU processes at
   startup; parallel runs kill each other's guests.
 - **Shared-disk contamination trap:** the harness reuses `tests/work/disk.img`,
@@ -108,7 +108,7 @@ python3 tests/qemu_test.py web      # one group
 - New stages start only with the user's go-ahead; within an approved stage,
   proceed without re-confirming.
 
-## Current status and known limits (v1.0.1)
+## Current status and known limits (v1.0.2)
 
 - **Versioning:** the version string lives in `src/kernel.c` (banner and
   `version` command), `src/gui.c` (GUI Info window), `src/net.c`
@@ -143,6 +143,17 @@ python3 tests/qemu_test.py web      # one group
   verified TLS exist, but there are no logins/passwords, no FS permissions,
   no disk encryption, no ASLR/stack canaries; the hand-written parsers are
   unfuzzed; entropy is weak on CPUs without RDRAND.
+- **v1.0.2 security fix:** a red-team exercise (2026-11-03) confirmed a full
+  ring-3 → ring-0 privilege escalation in v1.0.1: the ELF loader computed a
+  segment's end address in 32 bits, so a crafted `p_memsz` wrapped the range
+  checks while the copy loop wrote attacker bytes over kernel code; the
+  `int 0x80` write syscall also dereferenced user pointers unchecked.
+  v1.0.2 validates all segment ranges in 64-bit before any copy and checks
+  syscall pointers against the user window. Full write-up:
+  `docs/security-review.md`; PoC builders kept in `tests/redteam/`;
+  regression checks live in the `apps` harness group. Treat any pre-v1.0.2
+  claim that installed apps are "isolated" as void — they were kernel-
+  equivalent if malicious.
 - App ABI: installed apps are ELFs built for this OS only (3 syscalls);
   ordinary Linux/Windows binaries do not run. A Linux-compat layer, DOS
   support, and an EFI-stub loader were discussed with the user as possible

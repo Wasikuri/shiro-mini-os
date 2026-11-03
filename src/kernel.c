@@ -629,7 +629,7 @@ static void run_command(char *line) {
     } else if (strcmp_(line, "clear") == 0) {
         term_clear();
     } else if (strcmp_(line, "version") == 0) {
-        print("Shiro Mini OS v1.0.1 (interrupts+memory+tasks+fs+net+whois+gui+vbe+edit+rtc+tls+apps+browser+js+uefi+gop+css+forms+img)\n");
+        print("Shiro Mini OS v1.0.2 (interrupts+memory+tasks+fs+net+whois+gui+vbe+edit+rtc+tls+apps+browser+js+uefi+gop+css+forms+img)\n");
     } else if (strcmp_(line, "uptime") == 0) {
         print("Uptime: "); print_dec(uptime_seconds()); print(" s (");
         print_dec(timer_ticks); print(" ticks @ 100 Hz)\n");
@@ -828,7 +828,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     term_clear();
     term_color = 0x0B; /* cyan */
     print("========================================\n");
-    print("  Shiro Mini OS v1.0.1\n");
+    print("  Shiro Mini OS v1.0.2\n");
     print("========================================\n");
     term_color = 0x0F;
     cpu_init();

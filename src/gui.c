@@ -1365,7 +1365,7 @@ static void draw_info_content(uint8_t *fb) {
     /* unique marker icon (also used by the GUI tests to track the window) */
     fill_rounded_rect(fb, x + 8, y + 26, 12, 12, 3, COL_ICON);
     char b[48];
-    draw_string(fb, x + 26, y + 24, "Shiro Mini OS v1.0.1", COL_INFO_TEXT);
+    draw_string(fb, x + 26, y + 24, "Shiro Mini OS v1.0.2", COL_INFO_TEXT);
     g_strcpy(b, "RAM: ");
     g_strcat_dec(b, mm_ram_mb());
     g_strcat(b, " MB");
